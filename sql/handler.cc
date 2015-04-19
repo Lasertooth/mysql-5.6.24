@@ -167,6 +167,8 @@ const char *ha_legacy_type_name(legacy_db_type legacy_type)
     return "DB_TYPE_MARIA";
   case DB_TYPE_PERFORMANCE_SCHEMA:
     return "DB_TYPE_PERFORMANCE_SCHEMA";
+  case DB_TYPE_ROCKSDB:
+    return "DB_TYPE_ROCKSDB";
   default:
     return "DB_TYPE_DYNAMIC";
   }
