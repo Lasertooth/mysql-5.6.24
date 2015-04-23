@@ -1,3 +1,4 @@
+#include "cocdb_client.h"
 /* 
    Copyright (c) 2013 Monty Program Ab
 
@@ -32,11 +33,11 @@ class Apply_changes_iter
   
   /* These are the iterators we're merging. We own them, so should free them */
   Row_table_iter *trx; 
-  rocksdb::Iterator* rdb;
+  CocDbIterator* cocdb;
 public:
   Apply_changes_iter();
   ~Apply_changes_iter();
-  void init(Row_table *trx_arg, rocksdb::Iterator *rdb_arg);
+  void init(Row_table *trx_arg, CocDbIterator *rdb_arg);
 
   void Next();
   void Prev();

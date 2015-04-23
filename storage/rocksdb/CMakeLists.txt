@@ -30,7 +30,6 @@ ENDIF()
 
 INCLUDE_DIRECTORIES(AFTER ${Rocksdb_INCLUDE_DIRS})
 SET(CMAKE_REQUIRED_INCLUDES ${Rocksdb_INCLUDE_DIRS})
-
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --std=c++11")
 
 # TODO is there a better way to do this?
@@ -47,10 +46,13 @@ IF(ROCKSDB_OK)
       ha_rocksdb.cc ha_rocksdb.h 
       rdb_datadic.cc rdb_datadic.h
       rdb_locks.cc rdb_locks.h 
+      cocdb.grpc.pb.cc cocdb.grpc.pb.h
+      cocdb.pb.cc cocdb.pb.h
+      cocdb_client.cc cocdb_client.h
       rdb_rowmods.cc rdb_rowmods.h
       rdb_applyiter.cc rdb_applyiter.h)
 
-  MYSQL_ADD_PLUGIN(rocksdb_se ${ROCKSDB_SOURCES} STORAGE_ENGINE STATIC_ONLY MANDATORY LINK_LIBRARIES ${LINK_DIR} snappy bz2)
+  MYSQL_ADD_PLUGIN(rocksdb_se ${ROCKSDB_SOURCES} STORAGE_ENGINE STATIC_ONLY MANDATORY LINK_LIBRARIES ${LINK_DIR} snappy bz2 grpcxx_unsecure grpc gpr protobuf pthread dl)
 
   ADD_SUBDIRECTORY(unittest)
 ENDIF(ROCKSDB_OK)

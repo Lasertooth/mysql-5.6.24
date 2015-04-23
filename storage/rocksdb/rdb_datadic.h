@@ -1,3 +1,4 @@
+#include "cocdb_client.h"
 /* 
    Copyright (c) 2012,2013 Monty Program Ab
 
@@ -282,7 +283,7 @@ public:
   mysql_mutex_t mutex; // guards the following:
   longlong auto_incr_val;
 
-  void write_to(rocksdb::DB *rdb_dict, uchar *key, size_t keylen);
+  void write_to(CocDbClient *cocdb, uchar *key, size_t keylen);
 };
 
 
@@ -338,17 +339,17 @@ class Table_ddl_manager
   };
 
 public:
-  bool init(rocksdb::DB *rdb_dict);
+  bool init(CocDbClient *cocdb);
   void cleanup();
 
-  int put_and_write(RDBSE_TABLE_DEF *key_descr, rocksdb::DB *rdb_dict);
+  int put_and_write(RDBSE_TABLE_DEF *key_descr, CocDbClient *rdb_dict);
   int put(RDBSE_TABLE_DEF *key_descr, bool lock= true);
-  void remove(RDBSE_TABLE_DEF *rec, rocksdb::DB *rdb_dict, bool lock=true);
+  void remove(RDBSE_TABLE_DEF *rec, CocDbClient *cocdb, bool lock=true);
 
   RDBSE_TABLE_DEF *find(uchar *table_name, uint len, bool lock=true);
   
   bool rename(uchar *from, uint from_len, uchar *to, uint to_len, 
-              rocksdb::DB *rdb_dict);
+              CocDbClient *cocdb);
 
   int get_next_number() { return sequence.get_next_number(); }
 private:

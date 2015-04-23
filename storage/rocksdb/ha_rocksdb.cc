@@ -29,6 +29,8 @@
 #include "rdb_locks.h"
 #include "rdb_rowmods.h"
 
+#include "cocdb_client.h"
+
 void dbug_dump_database(rocksdb::DB *db);
 
 static handler *rocksdb_create_handler(handlerton *hton,
@@ -40,7 +42,8 @@ void key_copy(uchar *to_key, uchar *from_record, KEY *key_info,
 
 handlerton *rocksdb_hton;
 
-rocksdb::DB *rdb= NULL;
+//rocksdb::DB *rdb= NULL;
+CocDbClient *cocdb = NULL;
 
 Table_ddl_manager ddl_manager;
 
@@ -206,13 +209,12 @@ int compare_mem_comparable_keys(const uchar *a, size_t a_len, const uchar *b, si
 class Rdb_transaction
 {
 public:
-  /* The snapshot the transaction is used */
-  const rocksdb::Snapshot *snapshot;
-
   /* The changes made by this transaction (and not yet applied) */
   Row_table changes;
 
   uint n_writes;
+
+  std::string trx_id;
 
   /* 
     These are needed to use LF-Hash. They are allocated per-thread. Logically,
@@ -280,7 +282,6 @@ private:
 
   int flush_batch_intern()
   {
-    bool res= false;
     rocksdb::WriteBatch batch;
 
     if (changes.is_empty())
@@ -299,9 +300,9 @@ private:
         batch.Put(iter.key(), iter.value());
       }
     }
-    rocksdb::Status s= rdb->Write(rocksdb::WriteOptions(), &batch);
-    res= !s.ok(); // we return true when something failed
-    return res;
+    //rocksdb::Status s= rdb->Write(rocksdb::WriteOptions(), &batch);
+    return cocdb->Write(&batch);
+    //res= !s.ok(); // we return true when something failed
   }
 
 public:
@@ -324,33 +325,25 @@ public:
   */
   void rollback_stmt() { changes.rollback_stmt(); }
 
-  void start_stmt() { changes.start_stmt(); } 
+  void start_stmt() {
+    changes.start_stmt();
+    cocdb->Begin(&trx_id);
+  }
   void rollback()
   {
-    if (snapshot)
-    {
-      rdb->ReleaseSnapshot(snapshot);
-      snapshot= NULL;
-    }
-
     changes.reinit();
     release_locks();
     n_writes= 0;
   }
 
   Rdb_transaction() : 
-    snapshot(NULL), n_writes(0), pins(NULL)
+    n_writes(0), pins(NULL)
   {
     changes.init();
   }
 
   ~Rdb_transaction() 
   { 
-    if (snapshot)
-    {
-      rdb->ReleaseSnapshot(snapshot);
-      snapshot= NULL;
-    }
     changes.cleanup();
   }
 };
@@ -374,12 +367,6 @@ static Rdb_transaction *get_or_create_trx(THD *thd)
     if (!(trx= new Rdb_transaction))
       return NULL;
     trx->pins= row_locks.get_pins();
-    trx->snapshot= rdb->GetSnapshot();
-  }
-  else
-  {
-    if (!trx->snapshot)
-      trx->snapshot= rdb->GetSnapshot();
   }
   return trx;
 }
@@ -443,6 +430,8 @@ static int rocksdb_init_func(void *p)
   init_rocksdb_psi_keys();
 #endif
 
+  grpc_init();
+
   rocksdb_hton= (handlerton *)p;
   mysql_mutex_init(ex_key_mutex_example, &rocksdb_mutex, MY_MUTEX_INIT_FAST);
   (void) my_hash_init(&rocksdb_open_tables,system_charset_info,32,0,0,
@@ -471,20 +460,9 @@ static int rocksdb_init_func(void *p)
   row_locks.init(compare_mem_comparable_keys, 
                  Primary_key_comparator::get_hashnr);
 
-  rocksdb::Options main_opts;
-  main_opts.create_if_missing = true;
-  main_opts.comparator= &primary_key_comparator;
-  rocksdb::Status status;
-  status= rocksdb::DB::Open(main_opts, "./rocksdb", &rdb);
+  cocdb= new CocDbClient(grpc::CreateChannel("192.168.188.102:10000", grpc::InsecureCredentials(), ChannelArguments()));
 
-  if (!status.ok())
-  {
-    std::string err_text= status.ToString();
-    sql_print_error("RocksDB: Error opening instance: %s", err_text.c_str());
-    DBUG_RETURN(1);
-  }
-
-  if (ddl_manager.init(rdb))
+  if (ddl_manager.init(cocdb))
     DBUG_RETURN(1);
 
   sql_print_information("RocksDB instance opened");
@@ -504,8 +482,8 @@ static int rocksdb_done_func(void *p)
   row_locks.cleanup();
   ddl_manager.cleanup();
 
-  delete rdb;
-  rdb= NULL;
+  delete cocdb;
+  cocdb= NULL;
 
   DBUG_RETURN(error);
 }
@@ -550,8 +528,6 @@ static ROCKSDB_SHARE *get_share(const char *table_name, TABLE *table)
     if (my_hash_insert(&rocksdb_open_tables, (uchar*) share))
       goto error;
     thr_lock_init(&share->lock);
-    //mysql_mutex_init(ex_key_mutex_ROCKSDB_SHARE_mutex,
-    //                 &share->mutex, MY_MUTEX_INIT_FAST);
   }
   share->use_count++;
   mysql_mutex_unlock(&rocksdb_mutex);
@@ -559,7 +535,6 @@ static ROCKSDB_SHARE *get_share(const char *table_name, TABLE *table)
   return share;
 
 error:
- // mysql_mutex_destroy(&share->mutex);
   my_free(share);
 
   return NULL;
@@ -957,7 +932,7 @@ int ha_rocksdb::create_key_defs(TABLE *table_arg, const char *db_table, uint len
   tbl_def->n_keys= n_keys;
   tbl_def->key_descr= key_descr;
   tbl_def->dbname_tablename.append(db_table, len);
-  if (ddl_manager.put_and_write(tbl_def, rdb))
+  if (ddl_manager.put_and_write(tbl_def, cocdb))
     goto error;
 
   DBUG_RETURN(0);
@@ -1539,15 +1514,10 @@ int ha_rocksdb::get_row_by_rowid(uchar *buf, const char *rowid, uint rowid_size)
       DBUG_RETURN(return_lock_failure(timed_out));
   }
 
-  rocksdb::ReadOptions options;
-  if (!lock_rows)
-    options.snapshot= trx->snapshot;
-  
   bool found;
   if (!trx->changes.Get(key_slice, &retrieved_record, &found))
   {
-    rocksdb::Status s= rdb->Get(options, key_slice, &retrieved_record);
-    found= !s.IsNotFound();
+    found= cocdb->Get(key_slice, &retrieved_record);
   }
 
   if (found)
@@ -1728,17 +1698,10 @@ int ha_rocksdb::write_row(uchar *buf)
       DBUG_RETURN(return_lock_failure(timed_out));
     }
 
-    /* 
-      note: we intentionally don't set options.snapshot here. We want to read 
-      the latest committed data.
-    */ 
-    rocksdb::ReadOptions options; 
-
     bool found;
     if (!trx->changes.Get(key_slice, &retrieved_record, &found))
     {
-      rocksdb::Status s= rdb->Get(options, key_slice, &retrieved_record);
-      found= !s.IsNotFound();
+      found= cocdb->Get(key_slice, &retrieved_record);
     }
 
     if (found) 
@@ -1810,9 +1773,7 @@ void ha_rocksdb::setup_index_scan(rocksdb::Slice *slice)
   if (!scan_it)
   {
     rocksdb::ReadOptions options;
-    if (!lock_rows)
-      options.snapshot= trx->snapshot;
-    rocksdb::Iterator* rocksdb_it= rdb->NewIterator(options);
+    CocDbIterator* rocksdb_it= new CocDbIterator(cocdb, "");
     scan_it= new Apply_changes_iter;
     scan_it->init(&trx->changes, rocksdb_it);
   }
@@ -1912,13 +1873,11 @@ retry:
         if (!(lock= trx->get_lock((const uchar*)key.data(), key.size(), &timed_out)))
           DBUG_RETURN(return_lock_failure(timed_out));
         
-        rocksdb::ReadOptions options;
         /* lock_rows==TRUE, so not setting options.snapshot */
         bool found;
         if (!trx->changes.Get(key, &retrieved_record, &found))
         {
-          rocksdb::Status s= rdb->Get(options, key, &retrieved_record);
-          found= !s.IsNotFound();
+          found= cocdb->Get(key, &retrieved_record);
         }
 
         if (!found) 
@@ -2129,10 +2088,8 @@ int ha_rocksdb::update_row(const uchar *old_data, uchar *new_data)
     bool found;
     if (!trx->changes.Get(key_slice, &retrieved_record, &found))
     {
-      rocksdb::ReadOptions options; 
       /* Not setting options.snapshot, we need to check the real contents */
-      rocksdb::Status s= rdb->Get(options, key_slice, &retrieved_record);
-      found= !s.IsNotFound();
+      found= cocdb->Get(key_slice, &retrieved_record);
     }
 
     if (found) 
@@ -2326,7 +2283,7 @@ int ha_rocksdb::delete_table(const char *tablename)
     Remove the table entry in data dictionary (this will also remove it from
     the persistent data dictionary).
   */
-  ddl_manager.remove(tbl, rdb, true);
+  ddl_manager.remove(tbl, cocdb, true);
 
   DBUG_RETURN(0);
 }
@@ -2334,7 +2291,7 @@ int ha_rocksdb::delete_table(const char *tablename)
 
 void ha_rocksdb::remove_rows(RDBSE_TABLE_DEF *tbl)
 {
-  rocksdb::Iterator* it= rdb->NewIterator(rocksdb::ReadOptions());
+  CocDbIterator* it= new CocDbIterator(cocdb, "");
   
   char key_buf[MAX_KEY_LENGTH];
   uint key_len;
@@ -2354,7 +2311,7 @@ void ha_rocksdb::remove_rows(RDBSE_TABLE_DEF *tbl)
       rocksdb::Slice key= it->key();
       if (!tbl->key_descr[i]->covers_key(key.data(), key.size()))
         break;
-      rdb->Delete(rocksdb::WriteOptions(), key);
+      cocdb->Delete(key);
       it->Next();
     }
   }
@@ -2374,7 +2331,7 @@ int ha_rocksdb::rename_table(const char *from, const char *to)
     return HA_ERR_INTERNAL_ERROR;
 
   if (ddl_manager.rename((uchar*)from_str.ptr(), from_str.length(),
-                         (uchar*)to_str.ptr(), to_str.length(), rdb))
+                         (uchar*)to_str.ptr(), to_str.length(), cocdb))
     return HA_ERR_INTERNAL_ERROR;
 
   return 0;

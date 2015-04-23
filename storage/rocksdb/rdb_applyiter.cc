@@ -30,23 +30,23 @@ int compare_mem_comparable_keys(const uchar *a, size_t a_len, const uchar *b, si
 
 
 Apply_changes_iter::Apply_changes_iter() :
-  trx(NULL), rdb(NULL) 
+  trx(NULL), cocdb(NULL) 
 {}
 
 
 Apply_changes_iter::~Apply_changes_iter() 
 { 
   delete trx;
-  delete rdb;
+  delete cocdb;
 }
 
 
-void Apply_changes_iter::init(Row_table *trx_arg, rocksdb::Iterator *rdb_arg)
+void Apply_changes_iter::init(Row_table *trx_arg, CocDbIterator *it)
 {
   delete trx;
-  delete rdb;
+  delete cocdb;
   trx= new Row_table_iter(trx_arg);
-  rdb= rdb_arg; 
+  cocdb= it;
   valid= false;
 }
 
@@ -57,7 +57,7 @@ void Apply_changes_iter::Next()
   if (cur_is_trx)
     trx->Next();
   else
-    rdb->Next();
+    cocdb->Next();
 
   advance(1);
 }
@@ -69,7 +69,7 @@ void Apply_changes_iter::Prev()
   if (cur_is_trx)
     trx->Prev();
   else
-    rdb->Prev();
+    cocdb->Prev();
 
   advance(-1);
 }
@@ -77,7 +77,7 @@ void Apply_changes_iter::Prev()
 
 void Apply_changes_iter::Seek(rocksdb::Slice &key)
 {
-  rdb->Seek(key);
+  cocdb->Seek(key);
   trx->Seek(key);
   advance(1);
 }
@@ -85,7 +85,7 @@ void Apply_changes_iter::Seek(rocksdb::Slice &key)
 
 void Apply_changes_iter::SeekToLast()
 {
-  rdb->SeekToLast();
+  cocdb->SeekToLast();
   trx->SeekToLast();
   advance(-1);
 }
@@ -100,7 +100,7 @@ void Apply_changes_iter::advance(int direction)
   valid= true;
   while (1)
   {
-    if (!trx->Valid() && !rdb->Valid())
+    if (!trx->Valid() && !cocdb->Valid())
     {
       // ok we got here if neither scan nor trx have any records.
       cur_is_trx= false;  //just set it to something
@@ -115,7 +115,7 @@ void Apply_changes_iter::advance(int direction)
       break;
     }
 
-    if (!rdb->Valid())
+    if (!cocdb->Valid())
     {
       cur_is_trx= true;
       if (trx->is_tombstone())
@@ -129,9 +129,9 @@ void Apply_changes_iter::advance(int direction)
       break;
     }
 
-    if (rdb->Valid() && trx->Valid())
+    if (cocdb->Valid() && trx->Valid())
     {
-      rocksdb::Slice rdb_key= rdb->key();
+      rocksdb::Slice rdb_key= cocdb->key();
       rocksdb::Slice trx_key= trx->key();
       int cmp= direction * 
                compare_mem_comparable_keys((const uchar*)trx_key.data(), trx_key.size(),
@@ -143,12 +143,12 @@ void Apply_changes_iter::advance(int direction)
           /* rocksdb has a record, but trx says we have deleted it */
           if (direction == 1)
           {
-            rdb->Next();
+            cocdb->Next();
             trx->Next();
           }
           else
           {
-            rdb->Prev();
+            cocdb->Prev();
             trx->Prev();
           }
           continue;  // restart the logic
@@ -156,9 +156,9 @@ void Apply_changes_iter::advance(int direction)
 
         /* trx has a newer version of the record */
         if (direction == 1) 
-          rdb->Next();
+          cocdb->Next();
         else
-          rdb->Prev();
+          cocdb->Prev();
         cur_is_trx= true;
         break;
       }
@@ -193,7 +193,7 @@ rocksdb::Slice Apply_changes_iter::value()
   if (cur_is_trx)
     return trx->value();
   else
-    return rdb->value();
+    return cocdb->value();
 }
 
 
@@ -202,6 +202,6 @@ rocksdb::Slice Apply_changes_iter::key()
   if (cur_is_trx)
     return trx->key();
   else
-    return rdb->key();
+    return cocdb->key();
 }
 

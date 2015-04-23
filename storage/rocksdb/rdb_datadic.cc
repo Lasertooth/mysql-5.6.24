@@ -536,7 +536,7 @@ void _rdbse_store_blob_length(uchar *pos,uint pack_length,uint length)
     dbname.tablename -> {index_nr, index_nr, index_nr, ... }
 */
 
-void RDBSE_TABLE_DEF::write_to(rocksdb::DB *rdb_dict, uchar *key, size_t keylen)
+void RDBSE_TABLE_DEF::write_to(CocDbClient *cocdb, uchar *key, size_t keylen)
 {
   StringBuffer<32> indexes;
 
@@ -544,12 +544,10 @@ void RDBSE_TABLE_DEF::write_to(rocksdb::DB *rdb_dict, uchar *key, size_t keylen)
   {
     write_int(&indexes, key_descr[i]->index_number);
   }
-  rocksdb::Slice skey((char*)key, keylen); 
+  rocksdb::Slice skey((char*)key, keylen);
   rocksdb::Slice svalue(indexes.c_ptr(), indexes.length());
 
-  rocksdb::WriteOptions options;
-  options.sync= true;
-  rdb_dict->Put(options, skey, svalue); 
+  cocdb->Put(skey, svalue);
 }
 
 
@@ -568,7 +566,7 @@ void Table_ddl_manager::free_hash_elem(void* data)
 }
 
 
-bool Table_ddl_manager::init(rocksdb::DB *rdb_dict)
+bool Table_ddl_manager::init(CocDbClient *cocdb)
 {
   mysql_rwlock_init(0, &rwlock);
   (void) my_hash_init(&ddl_hash, /*system_charset_info*/&my_charset_bin, 32,0,0,
@@ -580,8 +578,8 @@ bool Table_ddl_manager::init(rocksdb::DB *rdb_dict)
   store_index_number(ddl_entry, DDL_ENTRY_INDEX_NUMBER);
   rocksdb::Slice ddl_entry_slice((char*)ddl_entry, RDBSE_KEYDEF::INDEX_NUMBER_SIZE);
   
-  rocksdb::Iterator* it;
-  it= rdb_dict->NewIterator(rocksdb::ReadOptions());
+  CocDbIterator* it;
+  it= new CocDbIterator(cocdb, "");
   int i= 0;
   int max_number= DDL_ENTRY_INDEX_NUMBER + 1;
   for (it->Seek(ddl_entry_slice); it->Valid(); it->Next()) 
@@ -648,12 +646,12 @@ bool Table_ddl_manager::init(rocksdb::DB *rdb_dict)
 
   sequence.init(max_number+1);
 
-  if (!it->status().ok())
-  {
-    std::string s= it->status().ToString();
-    sql_print_error("RocksDB: Table_store: load error: %s", s.c_str());
-    return true;
-  }
+  //if (!it->status().ok())
+  //{
+  //  std::string s= it->status().ToString();
+  //  sql_print_error("RocksDB: Table_store: load error: %s", s.c_str());
+  //  return true;
+  // }
   delete it;
   sql_print_information("RocksDB: Table_store: loaded DDL data for %d tables", i);
   return false;
@@ -675,7 +673,7 @@ RDBSE_TABLE_DEF* Table_ddl_manager::find(uchar *table_name,
 }
 
 
-int Table_ddl_manager::put_and_write(RDBSE_TABLE_DEF *tbl, rocksdb::DB *rdb_dict)
+int Table_ddl_manager::put_and_write(RDBSE_TABLE_DEF *tbl, CocDbClient* cocdb)
 {
   uchar buf[NAME_LEN * 2 + RDBSE_KEYDEF::INDEX_NUMBER_SIZE];
   uint pos= 0;
@@ -690,7 +688,7 @@ int Table_ddl_manager::put_and_write(RDBSE_TABLE_DEF *tbl, rocksdb::DB *rdb_dict
   if ((res= put(tbl)))
     return res;
 
-  tbl->write_to(rdb_dict, buf, pos);
+  tbl->write_to(cocdb, buf, pos);
   return 0;
 }
 
@@ -719,7 +717,7 @@ int Table_ddl_manager::put(RDBSE_TABLE_DEF *tbl, bool lock)
 }
 
 
-void Table_ddl_manager::remove(RDBSE_TABLE_DEF *tbl, rocksdb::DB *rdb_dict, bool lock)
+void Table_ddl_manager::remove(RDBSE_TABLE_DEF *tbl, CocDbClient *cocdb, bool lock)
 {
   if (lock)
     mysql_rwlock_wrlock(&rwlock);
@@ -734,7 +732,7 @@ void Table_ddl_manager::remove(RDBSE_TABLE_DEF *tbl, rocksdb::DB *rdb_dict, bool
   pos += tbl->dbname_tablename.length();
 
   rocksdb::Slice tkey((char*)buf, pos);
-  rdb_dict->Delete(rocksdb::WriteOptions(), tkey); 
+  cocdb->Delete(tkey); 
 
   /* The following will also delete the object: */
   my_hash_delete(&ddl_hash, (uchar*) tbl);
@@ -746,7 +744,7 @@ void Table_ddl_manager::remove(RDBSE_TABLE_DEF *tbl, rocksdb::DB *rdb_dict, bool
 
 bool Table_ddl_manager::rename(uchar *from, uint from_len, 
                                uchar *to, uint to_len, 
-                               rocksdb::DB *rdb_dict)
+                               CocDbClient *cocdb)
 {
   RDBSE_TABLE_DEF *rec;
   RDBSE_TABLE_DEF *new_rec;
@@ -776,8 +774,8 @@ bool Table_ddl_manager::rename(uchar *from, uint from_len,
   new_pos += new_rec->dbname_tablename.length();
   
   // Create a key to add 
-  new_rec->write_to(rdb_dict, new_buf, new_pos);
-  remove(rec, rdb_dict, false);
+  new_rec->write_to(cocdb, new_buf, new_pos);
+  remove(rec, cocdb, false);
   put(new_rec, false);
   res= false; // ok
 err:
