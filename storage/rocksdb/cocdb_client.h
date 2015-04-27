@@ -41,7 +41,7 @@ class CocDbClient {
   CocDbClient(std::shared_ptr<ChannelInterface> channel)
       : stub_(CDB::NewStub(channel)) {}
 
-  bool doSeek(const std::string& trx_id, const std::string& key, std::string* next_key) {
+  bool doSeek(const std::string& trx_id, const std::string& key, std::string* val, std::string* next_key) {
     IterRequest req;
     req.set_offset_key(key);
     req.set_trx_id(trx_id);
@@ -54,8 +54,16 @@ class CocDbClient {
     Status status = stub_->Iter(&ctx, req, &reply);
     if (status.IsOk()) {
       *next_key = reply.cur_key();
+    } else {
+      return false;
+    }
+
+    std::string ret;
+    if (Get(reply.cur_key(), &ret)) {
+      *val = ret;
       return true;
     }
+
     return false;
   }
 
@@ -99,8 +107,23 @@ class CocDbClient {
     return false;
   }
 
+  class BatchIterateHandler : public rocksdb::WriteBatch::Handler {
+   public:
+    rocksdb::Slice value_;
+    rocksdb::Slice key_;
+    virtual void Put(const rocksdb::Slice& key, const rocksdb::Slice& value) {
+        key_ = key;
+        value_ = value;
+    }
+
+    virtual void Delete(const rocksdb::Slice& key) {
+    }
+  };
+
   bool Write(rocksdb::WriteBatch* batch) {
-    return true;
+    BatchIterateHandler handler;
+    batch->Iterate(&handler);
+    return Put(handler.key_, handler.value_);
   }
 
   void Shutdown() { stub_.reset(); }
@@ -145,22 +168,36 @@ class CocDbIterator {
 
     void Seek(const rocksdb::Slice& entry) {
       std::string next;
+      std::string val;
       if (trx_id_.empty()) {
         std::string trx;
         if (cocdb_->Begin(&trx)) {
             trx_id_ = trx;
             std::cout << "trx id:" << trx_id_ << std::endl;
             std::cout << "do seek" << std::endl;
-            if (cocdb_->doSeek(trx_id_, entry.ToString(), &next)) {
-              cur_key_ = next;
+            if (cocdb_->doSeek(trx_id_, entry.ToString(), &val, &next)) {
+              next_key_ = next;
+              cur_val_ = val;
+              cur_key_ = entry.ToString();
+              valid_ = true;
+              std::cout <<"cur val:" << cur_val_ << " " << "cur key: " << cur_key_ << " next key: " << next_key_ << std::endl;
+            } else {
+              std::cout << "seek occur error" << std::endl;
+              valid_ = false;
             }
             std::cout << "end do seek" << std::endl;
             cocdb_->Commit(trx_id_);
             std::cout << "bye" << std::endl;
         }
       } else {
-        if (cocdb_->doSeek(trx_id_, entry.ToString(), &next)) {
-          cur_key_ = next;
+        if (cocdb_->doSeek(trx_id_, entry.ToString(), &val, &next)) {
+          next_key_ = next;
+          cur_key_ = entry.ToString();
+          cur_val_ = val;
+          valid_ = true;
+          std::cout <<"cur val:" << cur_val_ << " " << "cur key: " << cur_key_ << " next key: " << next_key_ << std::endl;
+        } else {
+          valid_ = false;
         }
       }
     }
@@ -168,35 +205,50 @@ class CocDbIterator {
     void SeekToLast() {}
 
     bool Valid() {
-      return true;
+      return valid_;
     }
 
     void Next() {
       std::string next;
+      std::string val;
       if (trx_id_.empty()) {
         std::string trx;
         if (cocdb_->Begin(&trx)) {
             trx_id_ = trx;
-            if (cocdb_->doSeek(trx_id_, cur_key_, &next)) {
-                cur_key_ = next;
+            if (cocdb_->doSeek(trx_id_, next_key_, &val, &next)) {
+                cur_key_ = next_key_;
+                cur_val_ = val;
+                next_key_ = next;
+                valid_ = true;
+                std::cout <<"cur val:" << cur_val_ << " " << "cur key: " << cur_key_ << " next key: " << next_key_ << std::endl;
+            } else {
+                valid_ = false;
             }
             cocdb_->Commit(trx_id_);
         }
       } else {
-        if (cocdb_->doSeek(trx_id_, cur_key_, &next)) {
-          cur_key_ = next;
+        if (cocdb_->doSeek(trx_id_, next_key_, &val, &next)) {
+          cur_key_ = next_key_;
+          cur_val_ = val;
+          next_key_ = next;
+          valid_ = true;
+        } else {
+          valid_ = false;
         }
       }
     }
 
     void Prev() {}
     rocksdb::Slice key() { return rocksdb::Slice(cur_key_.c_str(), cur_key_.size()); }
-    rocksdb::Slice value() { return rocksdb::Slice(cur_key_.c_str(), cur_key_.size()); }
+    rocksdb::Slice value() { return rocksdb::Slice(cur_val_.c_str(), cur_val_.size()); }
     bool ok() { return true;}
  private:
     CocDbClient* cocdb_;
     std::string trx_id_;
+    std::string next_key_;
     std::string cur_key_;
+    std::string cur_val_;
+    bool valid_;
 };
 
 #endif

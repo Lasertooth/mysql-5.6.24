@@ -52,7 +52,7 @@ IF(ROCKSDB_OK)
       rdb_rowmods.cc rdb_rowmods.h
       rdb_applyiter.cc rdb_applyiter.h)
 
-  MYSQL_ADD_PLUGIN(rocksdb_se ${ROCKSDB_SOURCES} STORAGE_ENGINE STATIC_ONLY MANDATORY LINK_LIBRARIES ${LINK_DIR} snappy bz2 grpcxx_unsecure grpc gpr protobuf pthread dl)
+  MYSQL_ADD_PLUGIN(rocksdb_se ${ROCKSDB_SOURCES} STORAGE_ENGINE STATIC_ONLY MANDATORY LINK_LIBRARIES ${LINK_DIR} snappy bz2 grpcxx_unsecure grpc gpr protobuf pthread dl lz4)
 
   ADD_SUBDIRECTORY(unittest)
 ENDIF(ROCKSDB_OK)

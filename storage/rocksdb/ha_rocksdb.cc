@@ -460,7 +460,7 @@ static int rocksdb_init_func(void *p)
   row_locks.init(compare_mem_comparable_keys, 
                  Primary_key_comparator::get_hashnr);
 
-  cocdb= new CocDbClient(grpc::CreateChannel("192.168.188.102:10000", grpc::InsecureCredentials(), ChannelArguments()));
+  cocdb= new CocDbClient(grpc::CreateChannel("192.168.8.102:10000", grpc::InsecureCredentials(), ChannelArguments()));
 
   if (ddl_manager.init(cocdb))
     DBUG_RETURN(1);
