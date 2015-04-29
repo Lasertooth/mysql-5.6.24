@@ -57,7 +57,7 @@ typedef struct st_cockroachdb_share {
     //mysql_mutex_t mutex;
 
     THR_LOCK lock;
-} cockroachdb_SHARE;
+} COCKROACHDB_SHARE;
 
 class RDBSE_KEYDEF;
 class RDBSE_TABLE_DEF;
@@ -71,7 +71,7 @@ class Rdb_transaction;
 class ha_cockroachdb: public handler
 {
     THR_LOCK_DATA lock;      ///< MySQL lock
-    cockroachdb_SHARE *share;    ///< Shared lock info
+    COCKROACHDB_SHARE *share;    ///< Shared lock info
 
     bool check_keyread_allowed(uint inx, uint part, bool all_parts) const;
     /*

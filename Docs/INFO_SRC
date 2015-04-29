@@ -1,8 +1,8 @@
-commit: f25f4c74104fdef07dcd43147d90b4fe51c2d921
-date: 2015-04-27 13:01:57 +0800
-build-date: 2015-04-29 09:09:08 +0800 
-short: f25f4c7
-branch: master
+commit: 10aded100a5f4a3d5b8b30f7eaf7bf4898e899f5
+date: 2015-04-29 09:21:01 +0800
+build-date: 2015-04-29 21:08:47 +0800 
+short: 10aded1
+branch: refactor
 
 
 MySQL source 5.6.24

@@ -85,7 +85,7 @@ static SHOW_VAR cockroachdb_status_variables[]= {
   Function we use in the creation of our hash to get key.
   */
 
-static uchar* cockroachdb_get_key(cockroachdb_SHARE *share, size_t *length,
+static uchar* cockroachdb_get_key(COCKROACHDB_SHARE *share, size_t *length,
         my_bool not_used __attribute__((unused)))
 {
     *length=share->table_name_length;
@@ -248,11 +248,62 @@ void ha_cockroachdb::update_auto_incr_val()
 
 /**
   @brief
+  Example of simple lock controls. The "share" it creates is a
+  structure we will pass to each rocksdb handler. Do you have to have
+  one of these? Well, you have pieces that are used for locking, and
+  they are needed to function.
+*/
+
+static COCKROACHDB_SHARE *get_share(const char *table_name, TABLE *table)
+{
+  COCKROACHDB_SHARE *share;
+  uint length;
+  char *tmp_name;
+
+  mysql_mutex_lock(&cockroachdb_mutex);
+  length=(uint) strlen(table_name);
+
+  if (!(share=(COCKROACHDB_SHARE*) my_hash_search(&cockroachdb_open_tables,
+                                              (uchar*) table_name,
+                                              length)))
+  {
+    if (!(share=(COCKROACHDB_SHARE *)
+          my_multi_malloc(MYF(MY_WME | MY_ZEROFILL),
+                          &share, sizeof(*share),
+                          &tmp_name, length+1,
+                          NullS)))
+    {
+      mysql_mutex_unlock(&cockroachdb_mutex);
+      return NULL;
+    }
+
+    share->use_count=0;
+    share->table_name_length=length;
+    share->table_name=tmp_name;
+    strmov(share->table_name,table_name);
+
+    if (my_hash_insert(&cockroachdb_open_tables, (uchar*) share))
+      goto error;
+    thr_lock_init(&share->lock);
+  }
+  share->use_count++;
+  mysql_mutex_unlock(&cockroachdb_mutex);
+
+  return share;
+
+error:
+  my_free(share);
+
+  return NULL;
+}
+
+/**
+  @brief
   Free lock controls. We call this whenever we close a table. If the table had
   the last reference to the share, then we free memory associated with it.
   */
 
-static int free_share(cockroachdb_SHARE *share)
+static int free_share(COCKROACHDB_SHARE *share)
 {
     mysql_mutex_lock(&cockroachdb_mutex);
     if (!--share->use_count)
@@ -275,7 +326,7 @@ static handler* cockroachdb_create_handler(handlerton *hton,
 }
 
 
-    ha_cockroachdb::ha_cockroachdb(handlerton *hton, TABLE_SHARE *table_arg)
+ha_cockroachdb::ha_cockroachdb(handlerton *hton, TABLE_SHARE *table_arg)
 : handler(hton, table_arg),
     pk_can_be_decoded(false),
     pk_tuple(NULL), pk_packed_tuple(NULL),
@@ -366,7 +417,6 @@ void ha_cockroachdb::convert_record_from_storage_format(cockroachdb::Slice *slic
     }
 }
 
-
 /*
    Unpack the record in this->retrieved_record from storage format into
    buf (which can be table->record[0] or table->record[1])
@@ -428,6 +478,10 @@ void ha_cockroachdb::unpack_blobs_from_retrieved_record(uchar *buf)
 int ha_cockroachdb::open(const char *name, int mode, uint test_if_locked)
 {
     DBUG_ENTER("ha_cockroachdb::open");
+    if (!(share = get_share(name, table)))
+        DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    thr_lock_data_init(&share->lock, &lock, NULL);
+
     DBUG_RETURN(0);
 }
 
@@ -608,17 +662,6 @@ ulong ha_cockroachdb::index_flags(uint inx, uint part, bool all_parts) const
         HA_READ_RANGE |
         HA_READ_PREV;
 
-    if (check_keyread_allowed(inx, part, all_parts))
-        base_flags |= HA_KEYREAD_ONLY;
-
-    /*
-       Index-only reads on primary key are the same as table scan for us. Still,
-       we need to explicitly "allow" them, otherwise SQL layer will miss some
-       plans.
-       */
-    if (inx == table_share->primary_key)
-        base_flags |= HA_KEYREAD_ONLY;
-
     return base_flags;
 }
 
@@ -639,7 +682,10 @@ int ha_cockroachdb::index_read_map(uchar *buf, const uchar *key,
         key_part_map keypart_map,
         enum ha_rkey_function find_flag)
 {
-    return 0;
+    int rc;
+    DBUG_ENTER("ha_cockroach::index_read");
+    rc= HA_ERR_WRONG_COMMAND;
+    DBUG_RETURN(rc);
 }
 
 
@@ -658,13 +704,13 @@ int ha_cockroachdb::get_row_by_rowid(uchar *buf, const char *rowid, uint rowid_s
 
 int ha_cockroachdb::index_next(uchar *buf)
 {
-    return index_next_with_direction(buf, true);
+    return HA_ERR_WRONG_COMMAND;
 }
 
 
 int ha_cockroachdb::index_prev(uchar *buf)
 {
-    return index_next_with_direction(buf, false);
+    return HA_ERR_WRONG_COMMAND;
 }
 
 
@@ -730,8 +776,11 @@ int ha_cockroachdb::rnd_next(uchar *buf)
    */
 int ha_cockroachdb::rnd_next_with_direction(uchar *buf, bool move_forward)
 {
+    int rc = 0;
     DBUG_ENTER("ha_cockroachdb::rnd_next");
-    DBUG_RETURN(0);
+    rc = HA_ERR_END_OF_FILE;
+    table->status = STATUS_NOT_FOUND;
+    DBUG_RETURN(rc);
 }
 
 

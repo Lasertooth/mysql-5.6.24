@@ -1278,7 +1278,7 @@ int ha_tina::info(uint flag)
 {
   DBUG_ENTER("ha_tina::info");
   /* This is a lie, but you don't want the optimizer to see zero or 1 */
-  if (!records_is_known && stats.records < 2) 
+  if (!records_is_known && stats.records < 2)
     stats.records= 2;
   DBUG_RETURN(0);
 }
