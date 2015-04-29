@@ -473,6 +473,7 @@ int ha_example::index_next(uchar *buf)
 int ha_example::index_prev(uchar *buf)
 {
   int rc;
+  std::string s;
   DBUG_ENTER("ha_example::index_prev");
   MYSQL_INDEX_READ_ROW_START(table_share->db.str, table_share->table_name.str);
   rc= HA_ERR_WRONG_COMMAND;

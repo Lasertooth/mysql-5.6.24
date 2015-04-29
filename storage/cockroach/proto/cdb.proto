@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package cdb;
+
+service CDB {
+    rpc Get(GetRequest) returns (GetResponse) {}
+    rpc Put(PutRequest) returns (PutResponse) {}
+    rpc BeginTrx(BeginRequest) returns (Trx) {}
+    rpc CommitTrx(Trx) returns (CommitResponse) {}
+    rpc IterNext(IterRequest) returns (IterResponse) {}
+    rpc IterPrev(IterRequest) returns (IterResponse) {} 
+}
+
+message BeginRequest {
+}
+
+message Trx {
+    string trx_id = 1;
+}
+
+message Result {
+    enum Status {
+        OK = 0;
+        ERROR = 1;
+    }
+    Status status = 2;
+    optional string msg = 3;
+}
+
+message Operation {
+    enum Op {
+        PUT  = 0;
+        DELETE = 1;
+    }
+    Op type = 1;
+    bytes key = 2;
+    optional bytes val = 3;
+}
+
+message GetRequest {
+    bytes key = 1;
+    optional string trx_id = 2;
+}
+
+message GetResponse {
+    Result res = 1;
+    optional bytes val =2;
+}
+
+message PutRequest {
+    repeated Operation ops = 1;
+    optional string trx_id = 2;
+}
+
+message PutResponse {
+    Result res = 1;
+}
+
+message CommitResponse {
+    Result res = 1;
+}
+
+message IterRequest {
+    enum Pos {
+        HEAD = 0;
+        TAIL = 1;
+        OFFSET = 2;
+    }
+    optional bytes offset_key = 1;
+    optional string trx_id = 2;
+}
+
+message IterResponse {
+    Result res = 1;
+    optional bytes cur_key = 2;
+}
