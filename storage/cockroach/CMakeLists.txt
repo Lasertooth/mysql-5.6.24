@@ -14,8 +14,9 @@ SET(COCKROACHDB_SOURCES
       #rdb_datadic.cc rdb_datadic.h
       #rdb_locks.cc rdb_locks.h
       cocdb.grpc.pb.cc cocdb.grpc.pb.h
-      cocdb.pb.cc cocdb.pb.h)
-      #cocdb_client.cc cocdb_client.h)
+      cocdb.pb.cc cocdb.pb.h
+      datadic.cc datadic.h
+      cockroachdb.cc cockroachdb.h)
       #rdb_rowmods.cc rdb_rowmods.h
       #rdb_applyiter.cc rdb_applyiter.h)
 
