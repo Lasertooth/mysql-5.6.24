@@ -25,6 +25,10 @@
 
 #include "sql_string.h"
 #include "slice.h"
+#include "datadic.h"
+#include "cache_trx.h"
+#include "rowlock.h"
+#include "applyiter.h"
 
 //#ifdef HAVE_PSI_INTERFACE
 extern PSI_stage_info stage_waiting_on_row_lock;
@@ -73,18 +77,24 @@ class ha_cockroachdb: public handler
     THR_LOCK_DATA lock;      ///< MySQL lock
     COCKROACHDB_SHARE *share;    ///< Shared lock info
 
+    ApplyChangesIter *scan_it;
+
     bool check_keyread_allowed(uint inx, uint part, bool all_parts) const;
     /*
        Number of key parts in PK. This is the same as
        table->key_info[table->s->primary_key].keyparts
-       */
+    */
     uint pk_key_parts;
 
     //Rdb_transaction *cur_trx;
 
+    CDBSE_KEYDEF** key_descr;
+    CDBSE_KEYDEF* pk_descr;
+
+    CDBSE_TABLE_DEF* tbl_def;
     /*
        TRUE <=> Primary Key columns can be decoded from the index
-       */
+     */
     mutable bool pk_can_be_decoded;
 
     uchar *pk_tuple; /* Buffer for storing PK in KeyTupleFormat */

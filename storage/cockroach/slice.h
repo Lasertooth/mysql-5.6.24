@@ -79,7 +79,7 @@ class Slice {
       std::string result;
       char buf[10];
       for (size_t i = 0; i < size_; i++) {
-        snprintf(buf, 10, "%02X", (unsigned char)data_[i]);
+        snprintf(buf, 10, "%02X ", (unsigned char)data_[i]);
         result += buf;
       }
       return result;

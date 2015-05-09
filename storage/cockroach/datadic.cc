@@ -227,30 +227,25 @@ uint CDBSE_KEYDEF::pack_record(TABLE *tbl, const uchar *record,
   if (n_key_parts == 0 || n_key_parts == MAX_REF_PARTS)
     n_key_parts= key_info->actual_key_parts;
 
-  for (uint i=0; i < n_key_parts; i++)
-  {
+  for (uint i=0; i < n_key_parts; i++) {
     Field *field= key_info->key_part[i].field;
     my_ptrdiff_t ptr_diff= record - tbl->record[0];
     field->move_field_offset(ptr_diff);
 
     const int length= pack_info[i].image_len;
-    if (field->real_maybe_null())
-    {
-      if (field->is_real_null())
-      {
+    if (field->real_maybe_null()) {
+      if (field->is_real_null()) {
         /* NULL value. store '\0' so that it sorts before non-NULL values */
         *tuple++ = 0;
         memset(tuple, 0, length);
-      }
-      else
-      {
+      } else {
         // store '1'
         *tuple++ = 1;
         field->make_sort_key(tuple, length);
       }
-    }
-    else
+    } else {
       field->make_sort_key(tuple, length);
+    }
 
     tuple += length;
 
@@ -547,7 +542,7 @@ void CDBSE_TABLE_DEF::write_to(CockroachDB *cdb, uchar *key, size_t keylen)
   cockroachdb::Slice skey((char*)key, keylen);
   cockroachdb::Slice svalue(indexes.c_ptr(), indexes.length());
 
-  cdb->Put(skey, svalue);
+  cdb->PutAndCommit(skey, svalue);
 }
 
 
@@ -579,7 +574,9 @@ bool Table_ddl_manager::init(CockroachDB *cocdb)
   cockroachdb::Slice ddl_entry_slice((char*)ddl_entry, CDBSE_KEYDEF::INDEX_NUMBER_SIZE);
 
   CockroachIterator *it;
-  it= new CockroachIterator(cocdb, "");
+  std::string trx_id;
+  cocdb->Begin(&trx_id);
+  it= new CockroachIterator(cocdb, trx_id);
   int i= 0;
   int max_number= DDL_ENTRY_INDEX_NUMBER + 1;
   for (it->Seek(ddl_entry_slice); it->Valid(); it->Next())
@@ -589,6 +586,8 @@ bool Table_ddl_manager::init(CockroachDB *cocdb)
     CDBSE_TABLE_DEF *tdef= new CDBSE_TABLE_DEF;
     cockroachdb::Slice key= it->key();
     cockroachdb::Slice val= it->value();
+
+    std::cout << "scan: " << key.ToString(true) << " " << val.ToString(true) << std::endl;
 
     if (key.size() <= CDBSE_KEYDEF::INDEX_NUMBER_SIZE)
     {
@@ -652,6 +651,7 @@ bool Table_ddl_manager::init(CockroachDB *cocdb)
   //  sql_print_error("cockroachdb: Table_store: load error: %s", s.c_str());
   //  return true;
   // }
+  cocdb->Commit(trx_id);
   delete it;
   sql_print_information("cockroachdb: Table_store: loaded DDL data for %d tables", i);
   return false;
@@ -732,7 +732,7 @@ void Table_ddl_manager::remove(CDBSE_TABLE_DEF *tbl, CockroachDB *cocdb, bool lo
   pos += tbl->dbname_tablename.length();
 
   cockroachdb::Slice tkey((char*)buf, pos);
-  cocdb->Delete(tkey);
+  cocdb->DeleteAndCommit(tkey);
 
   /* The following will also delete the object: */
   my_hash_delete(&ddl_hash, (uchar*) tbl);

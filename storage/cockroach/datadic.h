@@ -1,3 +1,5 @@
+#ifndef COCKROACHDB_DATADIC_H_
+#define COCKROACHDB_DATADIC_H_
 /*
    Copyright (c) 2012,2013 Monty Program Ab
 
@@ -358,3 +360,4 @@ private:
   static void free_hash_elem(void* data);
 };
 
+#endif
