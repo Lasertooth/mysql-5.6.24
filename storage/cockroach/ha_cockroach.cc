@@ -1137,9 +1137,13 @@ int ha_cockroachdb::get_row_by_rowid(uchar *buf, const char *rowid, uint rowid_s
   bool found;
   if (!trx->changes.Get(key_slice, &retrieved_record, &found)) {
     std::string trx_id;
-    cocdb->Begin(&trx_id);
-    found= cocdb->Get(trx_id, key_slice, &retrieved_record);
-    cocdb->Commit(trx_id);
+    //cocdb->Begin(&trx_id);
+    if (cocdb->Get(trx->trx_id_, key_slice, &retrieved_record) && !retrieved_record.empty()) {
+      found = true;
+    } else {
+      found = false;
+    }
+    //cocdb->Commit(trx_id);
   }
 
   if (found) {
