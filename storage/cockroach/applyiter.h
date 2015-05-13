@@ -25,7 +25,9 @@ class ApplyChangesIter {
 
   void Seek(cockroachdb::Slice &key);
 
-  bool Valid() { return valid; }
+  bool Valid() {
+    return valid;
+  }
 
   cockroachdb::Slice key();
   cockroachdb::Slice value();

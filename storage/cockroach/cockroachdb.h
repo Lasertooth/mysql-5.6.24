@@ -37,10 +37,8 @@ class CockroachDB {
   bool PutAndCommit(const cockroachdb::Slice& key, const cockroachdb::Slice& val) {
     std::string trx_id;
     if (Begin(&trx_id)) {
-      std::cout << "begin put trx " << trx_id << std::endl;
       if (Put(trx_id, key, val)) {
         bool ok = Commit(trx_id);
-        std::cout << "put " << key.ToString(true) << " " << val.ToString(true) << " " << ok << std::endl;
         return ok;
       }
     }
@@ -50,7 +48,7 @@ class CockroachDB {
   bool DeleteAndCommit(const cockroachdb::Slice& key) {
     std::string trx_id;
     if (Begin(&trx_id)) {
-      if (Delete(key)) {
+      if (Delete(trx_id, key)) {
         return Commit(trx_id);
       }
     }
@@ -116,8 +114,21 @@ class CockroachDB {
     return false;
   }
 
-  bool Delete(const cockroachdb::Slice& key) {
-    return true;
+  bool Delete(const std::string& trx_id, const cockroachdb::Slice& key) {
+    PutRequest req;
+    Operation* op = req.add_ops();
+    op->set_type(Operation::DELETE);
+    op->set_key(key.ToString());
+
+    req.set_trx_id(trx_id);
+    PutResponse reply;
+    ClientContext context;
+
+    Status status = stub_->Put(&context, req, &reply);
+    if (status.IsOk()) {
+      return true;
+    }
+    return false;
   }
 
   bool Begin(std::string* trx_id) {
@@ -146,7 +157,7 @@ class CockroachDB {
     return false;
   }
 
- private:
+ public:
   std::unique_ptr<CDB::Stub> stub_;
 };
 

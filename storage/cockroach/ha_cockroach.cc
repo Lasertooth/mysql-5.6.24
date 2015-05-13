@@ -253,11 +253,9 @@ class CacheTransaction {
   }
 
   bool commit() {
-    std::cout << "on trx commit" << std::endl;
     bool res= false;
     flush_batch();
     /* rollback() will delete snapshot, batch and locks */
-    std::cout << "do commit" << std::endl;
     cocdb->Commit(trx_id_);
     rollback();
     return res;
@@ -270,14 +268,26 @@ private:
       return false;
 
     RowTableIter iter(&changes);
+    PutRequest req;
 
     for (iter.SeekToFirst(); iter.Valid(); iter.Next()) {
       if (iter.is_tombstone()) {
-        cocdb->Delete(iter.key());
+        Operation* op = req.add_ops();
+        op->set_type(Operation::DELETE);
+        op->set_key(iter.key().ToString());
+        req.set_trx_id(trx_id_);
+        //cocdb->Delete(trx_id_, iter.key());
       } else {
-        cocdb->Put(trx_id_, iter.key(), iter.value());
+        Operation* op = req.add_ops();
+        op->set_type(Operation::PUT);
+        op->set_key(iter.key().ToString());
+        op->set_val(iter.value().ToString());
+        req.set_trx_id(trx_id_);
       }
     }
+    PutResponse reply;
+    ClientContext context;
+    cocdb->stub_->Put(&context, req, &reply);
     return 0;
   }
 
@@ -341,27 +351,28 @@ int ha_cockroachdb::write_row(uchar *buf) {
   uint packed_size= pk_descr->pack_record(table, buf, pk_packed_tuple, NULL, NULL);
   cockroachdb::Slice key_slice((const char*)pk_packed_tuple, packed_size);
 
-  std::cout << "write_row: " << key_slice.ToString(true) << std::endl;
-
   CacheTransaction *trx = get_or_create_trx(table->in_use);
 
   trx->prepare_for_write();
 
-  // write secondary index
-  // for (uint i = 0; i< table->s->keys; i++) {
-    // if (i != table->s->primary_key) {
-      // int packed_size;
-      // int tail_size;
-
-      // packed_size= key_descr[i]->pack_record(table, buf, sec_key_packed_tuple, sec_key_tails, &tail_size);
-      // cockroachdb::Slice secondary_key_slice((char*)sec_key_packed_tuple, packed_size);
-      // cockroachdb::Slice value_slice((char*)sec_key_tails, tail_size);
-      // trx->changes.Put(secondary_key_slice, value_slice);
-    // }
-  // }
-
   cockroachdb::Slice value_slice;
   convert_record_to_storage_format(&value_slice);
+
+  bool found = false;
+  if (!trx->changes.Get(key_slice, &retrieved_record, &found)) {
+    std::string trx_id;
+    cocdb->Begin(&trx_id);
+    if (cocdb->Get(trx_id, key_slice, &retrieved_record) && !retrieved_record.empty()) {
+      found = true;
+    } else {
+      found =false;
+    }
+    cocdb->Commit(trx_id);
+  }
+
+  if (found) {
+    DBUG_RETURN(HA_ERR_FOUND_DUPP_KEY);
+  }
 
   trx->changes.Put(key_slice, value_slice);
   trx->n_writes++;
@@ -962,9 +973,31 @@ ulong ha_cockroachdb::index_flags(uint inx, uint part, bool all_parts) const
    Read next index tuple through the secondary index.
    */
 
-int ha_cockroachdb::secondary_index_read(int keyno, uchar *buf)
-{
-  return 0;
+int ha_cockroachdb::secondary_index_read(int keyno, uchar *buf) {
+  if (scan_it->Valid()) {
+    cockroachdb::Slice key = scan_it->key();
+    if (key_descr[keyno]->covers_key(key.data(), key.size())) {
+      int rc;
+      uint size= key_descr[keyno]->get_primary_key_tuple(pk_descr, key.data(), (char*) pk_packed_tuple);
+      last_rowkey.copy((const char*)pk_packed_tuple, size, &my_charset_bin);
+
+      if (keyread_only) {
+        cockroachdb::Slice value = scan_it->value();
+        if (key_descr[keyno]->unpack_record(table, buf, &key, &value))
+          return HA_ERR_INTERNAL_ERROR;
+        rc=0;
+      } else {
+        rc = get_row_by_rowid(buf, (const char*)pk_packed_tuple, size);
+      }
+
+      if (!rc) {
+        table->status =0;
+        return rc;
+      }
+    }
+  }
+  table->status = STATUS_NOT_FOUND;
+  return HA_ERR_END_OF_FILE;
 }
 
 
@@ -974,12 +1007,120 @@ int ha_cockroachdb::index_read_map(uchar *buf, const uchar *key,
     key_part_map keypart_map,
     enum ha_rkey_function find_flag)
 {
-  int rc;
-  DBUG_ENTER("ha_cockroach::index_read");
-  rc= HA_ERR_WRONG_COMMAND;
+  int rc= 0;
+  DBUG_ENTER("ha_cockroach::index_read_map");
+
+  uint key_parts= table->key_info[active_index].user_defined_key_parts;
+  CDBSE_KEYDEF *kd= key_descr[active_index];
+
+  if (active_index == table->s->primary_key &&
+      find_flag == HA_READ_KEY_EXACT &&
+      ((keypart_map == ((key_part_map(1) << key_parts) - 1) ||
+        keypart_map == HA_WHOLE_KEY))) {
+    uint size= kd->pack_index_tuple(table, pk_packed_tuple, key, keypart_map);
+    rc= get_row_by_rowid(buf, (const char*)pk_packed_tuple, size);
+    DBUG_RETURN(rc);
+  }
+
+  uint n_used_parts= my_count_bits(keypart_map);
+  uint packed_size;
+
+  packed_size= kd->pack_index_tuple(table, sec_key_packed_tuple, key, keypart_map);
+  if (find_flag == HA_READ_PREFIX_LAST_OR_PREV ||
+      find_flag == HA_READ_PREFIX_LAST) {
+    kd->successor(sec_key_packed_tuple, packed_size);
+  }
+
+  cockroachdb::Slice slice((char*)sec_key_packed_tuple, packed_size);
+  cockroachdb::Slice rkey;
+
+  setup_index_scan(&slice);
+  bool move_forward= true;
+
+  switch (find_flag) {
+  case HA_READ_KEY_EXACT:
+    {
+      if (!scan_it->Valid())
+        rc= HA_ERR_KEY_NOT_FOUND;
+      else {
+        rkey= scan_it->key();
+        if (!kd->covers_key(rkey.data(), rkey.size()) ||
+            kd->cmp_full_keys(rkey.data(), rkey.size(),
+              slice.data(), slice.size(), n_used_parts)) {
+          rc= HA_ERR_KEY_NOT_FOUND;
+        }
+      }
+      break;
+    }
+  case HA_READ_KEY_OR_NEXT:
+    {
+      if (!scan_it->Valid())
+        rc = HA_ERR_KEY_NOT_FOUND;
+      else {
+        rkey= scan_it->key();
+        if (!kd->covers_key(rkey.data(), rkey.size())) {
+          rc= HA_ERR_KEY_NOT_FOUND;
+        }
+      }
+      break;
+    }
+  case HA_READ_AFTER_KEY:
+    {
+      bool in_key;
+      bool have_row;
+
+      while ((have_row= scan_it->Valid())) {
+        rkey= scan_it->key();
+        if (!(in_key=kd->covers_key(rkey.data(), rkey.size())) ||
+            kd->cmp_full_keys(rkey.data(), rkey.size(),
+              slice.data(), slice.size(), n_used_parts)) {
+          break;
+        }
+        scan_it->Next();
+      }
+
+      if (!have_row || !in_key) {
+        rc=HA_ERR_END_OF_FILE;
+      }
+      break;
+    }
+  case HA_READ_KEY_OR_PREV:
+    {
+    }
+   default:
+    break;
+  }
+
+  skip_scan_it_next_call = false;
+  uint pk_size;
+
+  if (active_index == table->s->primary_key) {
+    pk_size= rkey.size();
+    memcpy(pk_packed_tuple, rkey.data(), pk_size);
+    last_rowkey.copy(rkey.data(), pk_size, &my_charset_bin);
+
+    cockroachdb::Slice value = scan_it->value();
+    convert_record_from_storage_format(&value, buf);
+  } else {
+    pk_size= kd->get_primary_key_tuple(pk_descr, rkey.data(), (char*) pk_packed_tuple);
+    last_rowkey.copy((const char*)pk_packed_tuple, pk_size, &my_charset_bin);
+
+    if (keyread_only) {
+      cockroachdb::Slice value = scan_it->value();
+      if (kd->unpack_record(table, buf, &rkey, &value))
+        rc= HA_ERR_INTERNAL_ERROR;
+      else
+        rc=0;
+    }
+  }
+
+  if (rc) {
+    table->status= STATUS_NOT_FOUND;
+    DBUG_RETURN(rc);
+  }
+
   DBUG_RETURN(rc);
 }
-
 
 int ha_cockroachdb::index_read_last_map(uchar * buf, const uchar * key,
     key_part_map keypart_map) {
@@ -988,46 +1129,90 @@ int ha_cockroachdb::index_read_last_map(uchar * buf, const uchar * key,
 
 int ha_cockroachdb::get_row_by_rowid(uchar *buf, const char *rowid, uint rowid_size) {
   DBUG_ENTER("ha_cockroachdb::get_row_by_rowid");
+  int rc= 0;
+  cockroachdb::Slice key_slice(rowid, rowid_size);
+
+  CacheTransaction *trx=get_or_create_trx(table->in_use);
+
+  bool found;
+  if (!trx->changes.Get(key_slice, &retrieved_record, &found)) {
+    std::string trx_id;
+    cocdb->Begin(&trx_id);
+    found= cocdb->Get(trx_id, key_slice, &retrieved_record);
+    cocdb->Commit(trx_id);
+  }
+
+  if (found) {
+    last_rowkey.copy((const char*)rowid, rowid_size, &my_charset_bin);
+    convert_record_from_storage_format(buf);
+    table->status = 0;
+    rc=0;
+  } else {
+    table->status= STATUS_NOT_FOUND;
+    rc= HA_ERR_KEY_NOT_FOUND;
+  }
+
   DBUG_RETURN(0);
 }
 
 
 int ha_cockroachdb::index_next(uchar *buf) {
-  return HA_ERR_WRONG_COMMAND;
+  return index_next_with_direction(buf, true);
 }
 
 
 int ha_cockroachdb::index_prev(uchar *buf) {
-  return HA_ERR_WRONG_COMMAND;
+  return index_next_with_direction(buf, false);
 }
 
 
 int ha_cockroachdb::index_next_with_direction(uchar *buf, bool move_forward) {
   DBUG_ENTER("ha_cockroachdb::index_next");
-  DBUG_RETURN(0);
+  int rc = 0;
+  if (active_index == table->s->primary_key) {
+    rc= rnd_next_with_direction(buf, move_forward);
+  }
+  else {
+    if (skip_scan_it_next_call)
+      skip_scan_it_next_call = false;
+    else {
+      scan_it->Next();
+      rc = secondary_index_read(active_index, buf);
+    }
+  }
+  DBUG_RETURN(rc);
 }
-
 
 int ha_cockroachdb::index_first(uchar *buf) {
+  uchar *key;
+  uint key_size;
+  int rc=0;
   DBUG_ENTER("ha_cockroachdb::index_first");
-  DBUG_RETURN(0);
-}
 
+  key = (active_index == table->s->primary_key) ? pk_packed_tuple: sec_key_packed_tuple;
+
+  key_descr[active_index]->get_infimum_key(key, &key_size);
+  cockroachdb::Slice index_key((const char*)key, key_size);
+
+  setup_index_scan(&index_key);
+  skip_scan_it_next_call = true;
+
+  rc=index_next(buf);
+  DBUG_RETURN(rc);
+}
 
 int ha_cockroachdb::index_last(uchar *buf) {
   DBUG_ENTER("ha_cockroachdb::index_first");
-  DBUG_RETURN(0);
+  int rc=0;
+  DBUG_RETURN(rc);
 }
 
+void ha_cockroachdb::unlock_row() {}
 
-void ha_cockroachdb::unlock_row() {
-}
 /*
    Open a cursor and position it at the passed record
    */
 void ha_cockroachdb::setup_index_scan(cockroachdb::Slice *slice) {
-  std::cout <<"setup index scan" << std::endl;
-
   CacheTransaction *trx = get_or_create_trx(table->in_use);
   if (!scan_it) {
     std::string trx_id;
@@ -1086,10 +1271,8 @@ retry:
       bool found;
       // not found in changes
       if (!trx->changes.Get(key, &retrieved_record, &found)) {
-        std::string trx_id;
-        cocdb->Begin(&trx_id);
-        found = cocdb->Get(trx_id, key, &retrieved_record);
-        cocdb->Commit(trx_id);
+        found = cocdb->Get(trx->trx_id_, key, &retrieved_record);
+        //cocdb->Commit(trx_id);
       }
       if (!found) {
         goto retry;
@@ -1102,7 +1285,6 @@ retry:
   } else {
     rc = HA_ERR_END_OF_FILE;
   }
-
   DBUG_RETURN(rc);
 }
 
@@ -1134,13 +1316,18 @@ int ha_cockroachdb::truncate() {
    */
 int ha_cockroachdb::delete_row(const uchar *buf) {
   DBUG_ENTER("ha_cockroachdb::delete_row");
+  cockroachdb::Slice key_slice(last_rowkey.ptr(), last_rowkey.length());
+  CacheTransaction *trx= get_or_create_trx(table->in_use);
+
+  trx->prepare_for_write();
+  trx->changes.Delete(key_slice);
+
   DBUG_RETURN(0);
 }
 
 
 int ha_cockroachdb::info(uint flag) {
-  DBUG_ENTER("ha_cockroachdb::info");
-  DBUG_RETURN(0);
+  return 0;
 }
 
 void ha_cockroachdb::position(const uchar *record) {
@@ -1162,6 +1349,25 @@ int ha_cockroachdb::return_lock_failure(bool timed_out) {
 
 int ha_cockroachdb::update_row(const uchar *old_data, uchar *new_data) {
   DBUG_ENTER("ha_cockroachdb::update_row");
+
+  uint packed_size = pk_descr->pack_record(table, new_data, pk_packed_tuple, NULL, NULL);
+  cockroachdb::Slice key_slice((const char*)pk_packed_tuple, packed_size);
+
+  CacheTransaction *trx= get_or_create_trx(table->in_use);
+
+  cockroachdb::Slice old_key_slice(last_rowkey.ptr(), last_rowkey.length());
+  if (primary_key_comparator.Compare(key_slice, old_key_slice)) {
+    // OK, they are different, we do delete + put
+    trx->prepare_for_write();
+    trx->changes.Delete(old_key_slice);
+  }
+
+  trx->prepare_for_write();
+
+  cockroachdb::Slice value_slice;
+  convert_record_to_storage_format(&value_slice);
+  trx->changes.Put(key_slice, value_slice);
+
   DBUG_RETURN(0);
 }
 
@@ -1208,7 +1414,6 @@ int ha_cockroachdb::external_lock(THD *thd, int lock_type) {
   if (lock_type == F_UNLCK) {
     if (!thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN)) {
       // commit
-      std::cout << "on commit!" << std::endl;
       CacheTransaction* trx = get_or_create_trx(thd);
       res = trx->commit();
 
